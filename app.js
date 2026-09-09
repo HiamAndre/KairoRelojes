@@ -89,7 +89,7 @@ async function cambiarPestaña(pestaña) {
   if (pestaña === 'resumen') await calcularResumenFinanciero();
 }
 
-// --- LÓGICA DE REGISTRO DE PAQUETE ---
+// --- LÓGICA DE REGISTRO DE PAQUETE CON HISTÓRICO Y PROMEDIO DE COSTOS ---
 function inicializarFormularioPaquete() {
   itemsPaquete = [];
   const contenedor = document.getElementById('contenedor-items');
@@ -156,6 +156,26 @@ function renderizarFilasPaquete() {
   if (!contenedor) return;
   contenedor.innerHTML = '';
 
+  // Obtener modelos únicos ya existentes en la base de datos para armar el combobox de selección rápida
+  const modelosUnicosMap = new Map();
+  productosLista.forEach(p => {
+    if (p.modelo && p.sku) {
+      // Extraer SKU base sin el sufijo de color (-COLOR)
+      let skuBase = p.sku;
+      if (p.color && skuBase.endsWith(`-${p.color.toUpperCase()}`)) {
+        skuBase = skuBase.substring(0, skuBase.length - p.color.length - 1);
+      }
+      if (!modelosUnicosMap.has(p.modelo)) {
+        modelosUnicosMap.set(p.modelo, {
+          modelo: p.modelo,
+          sku: skuBase,
+          costo_reloj: p.costo_reloj || 0,
+          costo_caja: p.costo_caja || 0
+        });
+      }
+    }
+  });
+
   itemsPaquete.forEach((item, index) => {
     let coloresHTML = '';
 
@@ -182,12 +202,28 @@ function renderizarFilasPaquete() {
       `;
     });
 
+    // Opciones del ComboBox para autocompletar modelos ya existentes
+    let opcionesCombobox = `<option value="">-- Seleccionar de relojes anteriores (Opcional) --</option>`;
+    modelosUnicosMap.forEach((val, modKey) => {
+      const selected = (item.modelo === modKey) ? 'selected' : '';
+      opcionesCombobox += `<option value="${modKey}" ${selected}>📦 ${val.modelo} (SKU: ${val.sku})</option>`;
+    });
+
     contenedor.innerHTML += `
       <div class="item-card" id="card-item-${item.id}">
         <div class="item-header">
           <span class="item-number">Modelo de Reloj #${index + 1}</span>
           <button type="button" onclick="eliminarFilaReloj('${item.id}')" class="btn-remove-item">✕ Eliminar Modelo</button>
         </div>
+
+        ${modelosUnicosMap.size > 0 ? `
+          <div class="form-group" style="margin-bottom: 16px;">
+            <label class="form-label">Seleccionar Reloj Existente (Autocompletar)</label>
+            <select class="form-select" onchange="seleccionarRelojExistente('${item.id}', this.value)">
+              ${opcionesCombobox}
+            </select>
+          </div>
+        ` : ''}
 
         <div class="form-grid cols-2">
           <div class="form-group">
@@ -220,6 +256,30 @@ function renderizarFilasPaquete() {
       </div>
     `;
   });
+}
+
+function seleccionarRelojExistente(itemid, modeloSeleccionado) {
+  if (!modeloSeleccionado) return;
+  
+  // Buscar un producto que corresponda a ese modelo para extraer sus datos base
+  // Si hay múltiples variantes, filtramos o tomamos la primera coincidencia
+  const prodMatch = productosLista.find(p => p.modelo === modeloSeleccionado);
+  if (prodMatch) {
+    let skuBase = prodMatch.sku;
+    if (prodMatch.color && skuBase.endsWith(`-${prodMatch.color.toUpperCase()}`)) {
+      skuBase = skuBase.substring(0, skuBase.length - prodMatch.color.length - 1);
+    }
+
+    const item = itemsPaquete.find(i => i.id === itemid);
+    if (item) {
+      item.sku = skuBase;
+      item.modelo = prodMatch.modelo;
+      item.costoReloj = prodMatch.costo_reloj || 0;
+      item.costoCaja = prodMatch.costo_caja || 0;
+      renderizarFilasPaquete();
+      calcularTodoElPaquete();
+    }
+  }
 }
 
 function actualizarItemData(id, campo, valor) {
@@ -330,7 +390,7 @@ function calcularTodoElPaquete() {
   }
 }
 
-// --- OPERACIONES DE SUPABASE ---
+// --- OPERACIONES DE SUPABASE (CON PONDERACIÓN DE PROMEDIO DE COSTOS SI YA EXISTE) ---
 async function guardarPaquete(e) {
   e.preventDefault();
   const btn = document.getElementById('btn-guardar');
@@ -338,8 +398,6 @@ async function guardarPaquete(e) {
   btn.disabled = true;
 
   try {
-    const registrosParaInsertar = [];
-
     for (const item of itemsPaquete) {
       for (const color of item.colores) {
         let imagenUrl = null;
@@ -363,27 +421,78 @@ async function guardarPaquete(e) {
 
         const skuFinal = color.nombre ? `${item.sku}-${color.nombre.toUpperCase()}` : item.sku;
         const cantidadColor = parseInt(color.cantidad) || 1;
+        const colorNombre = color.nombre || 'Único';
 
-        registrosParaInsertar.push({
-          sku: skuFinal,
-          modelo: item.modelo,
-          color: color.nombre || 'Único',
-          stock_inicial: cantidadColor,
-          stock_actual: cantidadColor,
-          costo_reloj: parseFloat(item.costoReloj),
-          costo_envio: parseFloat(item.envioCalculado),
-          costo_caja: parseFloat(item.costoCaja || 0),
-          costo_courier: parseFloat(item.courierCalculado),
-          costo_impuesto: parseFloat(item.impuestoCalculado),
-          imagen_url: imagenUrl
-        });
+        // 1. Verificar si ya existe un registro exacto (mismo SKU o mismo modelo + color) en la base de datos
+        const prodExistente = productosLista.find(p => p.sku === skuFinal || (p.modelo.toLowerCase() === item.modelo.toLowerCase() && p.color.toLowerCase() === colorNombre.toLowerCase()));
+
+        if (prodExistente) {
+          // LÓGICA DE PROMEDIO PONDERADO DE COSTOS Y ACUMULACIÓN DE STOCK
+          const stockActualPrevio = prodExistente.stock_actual || 0;
+          const nuevoStockTotal = stockActualPrevio + cantidadColor;
+
+          // Promedio ponderado para el costo del reloj
+          const costoRelojAnterior = Number(prodExistente.costo_reloj || 0);
+          const costoRelojNuevo = parseFloat(item.costoReloj) || 0;
+          const costoRelojPromedio = ((costoRelojAnterior * stockActualPrevio) + (costoRelojNuevo * cantidadColor)) / nuevoStockTotal;
+
+          // Promedio ponderado para envíos y otros costos asociados
+          const envioAnterior = Number(prodExistente.costo_envio || 0);
+          const envioNuevo = parseFloat(item.envioCalculado) || 0;
+          const envioPromedio = ((envioAnterior * stockActualPrevio) + (envioNuevo * cantidadColor)) / nuevoStockTotal;
+
+          const cajaAnterior = Number(prodExistente.costo_caja || 0);
+          const cajaNueva = parseFloat(item.costoCaja || 0);
+          const cajaPromedio = ((cajaAnterior * stockActualPrevio) + (cajaNueva * cantidadColor)) / nuevoStockTotal;
+
+          const courierAnterior = Number(prodExistente.costo_courier || 0);
+          const courierNuevo = parseFloat(item.courierCalculado) || 0;
+          const courierPromedio = ((courierAnterior * stockActualPrevio) + (courierNuevo * cantidadColor)) / nuevoStockTotal;
+
+          const baseImponiblePromedio = costoRelojPromedio + envioPromedio + cajaPromedio;
+          const impuestoPromedio = baseImponiblePromedio * 0.60;
+
+          // Actualizar el registro existente sumando stock y promediando los costos
+          const datosUpdate = {
+            stock_inicial: (prodExistente.stock_inicial || 0) + cantidadColor,
+            stock_actual: nuevoStockTotal,
+            costo_reloj: costoRelojPromedio,
+            costo_envio: envioPromedio,
+            costo_caja: cajaPromedio,
+            costo_courier: courierPromedio,
+            costo_impuesto: impuestoPromedio
+          };
+
+          if (imagenUrl) {
+            datosUpdate.imagen_url = imagenUrl; // Actualiza foto si se cargó una nueva
+          }
+
+          const { error: updateError } = await _supabase.from('productos').update(datosUpdate).eq('id', prodExistente.id);
+          if (updateError) throw updateError;
+
+        } else {
+          // Si es un modelo/color totalmente nuevo, se inserta como un registro aparte
+          const nuevoRegistro = {
+            sku: skuFinal,
+            modelo: item.modelo,
+            color: colorNombre,
+            stock_inicial: cantidadColor,
+            stock_actual: cantidadColor,
+            costo_reloj: parseFloat(item.costoReloj),
+            costo_envio: parseFloat(item.envioCalculado),
+            costo_caja: parseFloat(item.costoCaja || 0),
+            costo_courier: parseFloat(item.courierCalculado),
+            costo_impuesto: parseFloat(item.impuestoCalculado),
+            imagen_url: imagenUrl
+          };
+
+          const { error: insertError } = await _supabase.from('productos').insert([nuevoRegistro]);
+          if (insertError) throw insertError;
+        }
       }
     }
 
-    const { error: insertError } = await _supabase.from('productos').insert(registrosParaInsertar);
-    if (insertError) throw insertError;
-
-    alert('¡Paquete registrado exitosamente!');
+    alert('¡Paquete registrado exitosamente (costos promediados y stock actualizado)!');
     inicializarFormularioPaquete();
     cambiarPestaña('consultar');
 
@@ -605,7 +714,6 @@ async function cargarHistorialVentas() {
 async function eliminarVenta(ventaId, productoId) {
   if (!confirm('¿Estás seguro de eliminar esta venta? Esto sumará nuevamente 1 unidad al stock del reloj.')) return;
 
-  // 1. Obtener el producto asociado para conocer su stock actual
   const { data: producto, error: errProd } = await _supabase
     .from('productos')
     .select('stock_actual')
@@ -613,9 +721,8 @@ async function eliminarVenta(ventaId, productoId) {
     .single();
 
   if (errProd || !producto) {
-    alert('No se pudo encontrar el reloj asociado para devolver el stock (es posible que haya sido eliminado del inventario). Aún así, se procederá a eliminar la venta si lo deseas, o puedes cancelar.');
+    alert('No se pudo encontrar el reloj asociado para devolver el stock. Se procederá a eliminar la venta.');
   } else {
-    // 2. Sumar 1 al stock actual del producto
     const nuevoStock = producto.stock_actual + 1;
     const { error: errUpdate } = await _supabase
       .from('productos')
@@ -628,7 +735,6 @@ async function eliminarVenta(ventaId, productoId) {
     }
   }
 
-  // 3. Eliminar el registro de la venta
   const { error: errDelete } = await _supabase
     .from('ventas')
     .delete()
@@ -640,8 +746,6 @@ async function eliminarVenta(ventaId, productoId) {
   }
 
   alert('Venta eliminada correctamente y stock devuelto con éxito.');
-  
-  // 4. Recargar tablas y datos
   cargarHistorialVentas();
   cargarRelojes();
 }
