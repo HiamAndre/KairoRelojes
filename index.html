@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KAIRO - Control de Inventario</title>
+  
+  <!-- CDN de Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <!-- Estilos CSS -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- PANTALLA DE LOGIN (Visible por defecto si no hay sesión) -->
+  <div id="auth-container" class="auth-overlay">
+    <div class="auth-card">
+      <h1 class="header-title" style="text-align: center; margin-bottom: 8px;">KAIRO</h1>
+      <p class="form-subtitle" style="text-align: center; margin-bottom: 24px;">Ingresa tus credenciales para acceder al sistema</p>
+      
+      <form id="form-login" onsubmit="iniciarSesion(event)">
+        <div class="form-group" style="margin-bottom: 16px;">
+          <label class="form-label">Correo Electrónico</label>
+          <input type="email" id="login-email" class="form-input" placeholder="admin@kairo.com" required>
+        </div>
+        
+        <div class="form-group" style="margin-bottom: 24px;">
+          <label class="form-label">Contraseña</label>
+          <input type="password" id="login-password" class="form-input" placeholder="••••••••" required>
+        </div>
+
+        <button type="submit" id="btn-login" class="btn-submit">🔑 Iniciar Sesión</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- APLICACIÓN PRINCIPAL (Oculta hasta iniciar sesión) -->
+  <div id="app-container" class="hidden">
+    <header class="header">
+      <div class="header-container">
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <h1 class="header-title">KAIRO</h1>
+          <span id="user-email-display" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+        </div>
+        <nav class="nav-tabs" style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+          <button id="tab-btn-consultar" onclick="cambiarPestaña('consultar')" class="tab-btn active">
+            📦 Consultar Relojes
+          </button>
+          <button id="tab-btn-ventas" onclick="cambiarPestaña('ventas')" class="tab-btn inactive">
+            📈 Historial Ventas
+          </button>
+          <button id="tab-btn-gastos" onclick="cambiarPestaña('gastos')" class="tab-btn inactive">
+            💸 Gastos Varios
+          </button>
+          <button id="tab-btn-resumen" onclick="cambiarPestaña('resumen')" class="tab-btn inactive">
+            📊 Ver Resumen
+          </button>
+          <button id="tab-btn-ingresar" onclick="cambiarPestaña('ingresar')" class="tab-btn inactive">
+            ➕ Registrar Paquete
+          </button>
+          <button onclick="cerrarSesion()" class="tab-btn inactive" style="background: rgba(239, 68, 68, 0.1); color: var(--danger); border-color: rgba(239, 68, 68, 0.2);">
+            🚪 Salir
+          </button>
+        </nav>
+      </div>
+    </header>
+
+    <main class="main-container">
+      <!-- PESTAÑA 1: CONSULTAR RELOJES -->
+      <section id="pestaña-consultar">
+        <div class="toolbar">
+          <input type="text" id="input-buscar" oninput="filtrarRelojes()" placeholder="🔍 Buscar por SKU, modelo o color..." class="search-input">
+          <div class="metrics">
+            <div>Total Variantes: <span id="total-modelos">0</span></div>
+            <div>Unidades Totales: <span id="total-unidades">0</span></div>
+          </div>
+        </div>
+
+        <div id="grid-relojes" class="grid-relojes">
+          <!-- Tarjetas dinámicas -->
+        </div>
+      </section>
+
+      <!-- PESTAÑA: REGISTRAR VENTA -->
+      <section id="pestaña-vender" class="hidden">
+        <div class="form-card" style="max-width: 600px;">
+          <h2 class="form-title">Registrar Venta de Reloj</h2>
+          <p class="form-subtitle" id="vender-subtitulo">Ingresa los datos de la venta.</p>
+          
+          <form id="form-vender" onsubmit="confirmarVentaUnidad(event)">
+            <input type="hidden" id="vender-prod-id">
+            <input type="hidden" id="vender-stock-actual">
+            
+            <div class="form-group" style="margin-bottom: 16px;">
+              <label class="form-label">Precio de Venta (USD)</label>
+              <input type="number" step="0.01" id="vender-precio" class="form-input" placeholder="0.00" required>
+            </div>
+            
+            <div class="form-group" style="margin-bottom: 16px;">
+              <label class="form-label">Comisión de la Plataforma (USD)</label>
+              <input type="number" step="0.01" id="vender-comision" class="form-input" value="0.00" required>
+            </div>
+            
+            <div class="form-group" style="margin-bottom: 24px;">
+              <label class="form-label">Gasto de Envío para esta Venta (USD)</label>
+              <input type="number" step="0.01" id="vender-envio" class="form-input" value="0.00" required>
+            </div>
+            
+            <div style="display: flex; gap: 12px;">
+              <button type="submit" id="btn-confirmar-venta" class="btn-submit">✅ Confirmar Venta</button>
+              <button type="button" onclick="cambiarPestaña('consultar')" class="tab-btn inactive" style="flex: 1; padding: 16px;">❌ Cancelar</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- PESTAÑA 2: HISTORIAL DE VENTAS -->
+      <section id="pestaña-ventas" class="hidden">
+        <div class="form-card" style="max-width: 1200px;">
+          <h2 class="form-title">Historial de Ventas</h2>
+          <p class="form-subtitle">Registro detallado de los relojes vendidos, precios de salida, comisiones y costos de envío.</p>
+          <div style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem;">
+              <thead>
+                <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-muted);">
+                  <th style="padding: 12px;">Fecha</th>
+                  <th style="padding: 12px;">SKU / Modelo</th>
+                  <th style="padding: 12px;">Color</th>
+                  <th style="padding: 12px;">Precio Venta</th>
+                  <th style="padding: 12px;">Comisión</th>
+                  <th style="padding: 12px;">Envío Venta</th>
+                  <th style="padding: 12px;">Ganancia Neta</th>
+                  <th style="padding: 12px; text-align: center;">Acción</th>
+                </tr>
+              </thead>
+              <tbody id="tabla-ventas-body">
+                <!-- Filas dinámicas de ventas -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- PESTAÑA: GASTOS VARIOS -->
+      <section id="pestaña-gastos" class="hidden">
+        <div class="form-card" style="max-width: 1000px;">
+          <h2 class="form-title">Registrar Gasto Vario</h2>
+          <p class="form-subtitle">Lleva el control de gastos operativos, publicidad, herramientas, etc.</p>
+          
+          <form id="form-gasto" onsubmit="guardarGasto(event)">
+            <div class="form-grid cols-3" style="margin-bottom: 16px;">
+              <div class="form-group">
+                <label class="form-label">Concepto / Detalle</label>
+                <input type="text" id="gasto-concepto" class="form-input" placeholder="Ej: Anuncios en Instagram" required>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Categoría</label>
+                <select id="gasto-categoria" class="form-select">
+                  <option value="Publicidad">Publicidad / Marketing</option>
+                  <option value="Operativo">Operativo / Software</option>
+                  <option value="Envios">Envios / Logística Extra</option>
+                  <option value="Otros">Otros</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Monto (USD)</label>
+                <input type="number" step="0.01" id="gasto-monto" class="form-input" placeholder="0.00" required>
+              </div>
+            </div>
+            <button type="submit" id="btn-guardar-gasto" class="btn-submit">💾 Registrar Gasto</button>
+          </form>
+
+          <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 32px 0;">
+
+          <h3 class="form-title" style="font-size: 1.1rem; margin-bottom: 16px;">Historial de Gastos</h3>
+          <div style="overflow-x: auto;">
+            <table style="width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem;">
+              <thead>
+                <tr style="border-bottom: 1px solid var(--border-color); color: var(--text-muted);">
+                  <th style="padding: 12px;">Fecha</th>
+                  <th style="padding: 12px;">Concepto</th>
+                  <th style="padding: 12px;">Categoría</th>
+                  <th style="padding: 12px;">Monto</th>
+                  <th style="padding: 12px; text-align: center;">Acción</th>
+                </tr>
+              </thead>
+              <tbody id="tabla-gastos-body">
+                <!-- Dinámico -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- PESTAÑA: VER RESUMEN -->
+      <section id="pestaña-resumen" class="hidden">
+        <div class="form-card" style="max-width: 1000px;">
+          <h2 class="form-title">Balance y Resumen Financiero</h2>
+          <p class="form-subtitle">Visión general del estado financiero de la empresa (Ingresos por ventas menos costos de inventario, gastos y comisiones).</p>
+
+          <div class="form-grid cols-4" style="margin-bottom: 24px;" id="grid-metricas-resumen">
+            <!-- Métricas inyectadas por JS -->
+          </div>
+
+          <div class="package-summary-box">
+            <h3 class="form-label" style="margin-bottom: 12px; color: var(--text-main); font-size: 0.9rem;">Detalle de Cálculos</h3>
+            <div id="detalle-balance-texto" style="font-size: 0.85rem; color: var(--text-muted); display: flex; flex-direction: column; gap: 8px;">
+              <!-- Desglose -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PESTAÑA 3: INGRESAR PAQUETE -->
+      <section id="pestaña-ingresar" class="hidden">
+        <div class="form-card">
+          <h2 class="form-title">Registrar Nuevo Paquete</h2>
+          <p class="form-subtitle">Ingresa los costos globales y configura individualmente cada modelo con sus variantes de color y fotos.</p>
+
+          <form id="form-paquete" onsubmit="guardarPaquete(event)">
+            <div class="package-box">
+              <h3 class="form-label" style="margin-bottom: 12px; color: var(--text-main); font-size: 0.85rem;">1. Costos de Envío Globales (USD)</h3>
+              
+              <div class="form-grid cols-3">
+                <div class="form-group">
+                  <label class="form-label">Envío Proveedor Total (DDP)</label>
+                  <input type="number" step="0.01" id="pkg_envio_total" oninput="calcularTodoElPaquete()" value="0.00" class="form-input">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Envío Courier Total (EEUU / Local)</label>
+                  <input type="number" step="0.01" id="pkg_courier_total" oninput="calcularTodoElPaquete()" value="0.00" class="form-input">
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Criterio de Reparto del Envío</label>
+                  <select id="pkg_criterio" onchange="calcularTodoElPaquete()" class="form-select">
+                    <option value="equitativo">Equitativo (Por Unidad)</option>
+                    <option value="proporcional">Proporcional al Precio del Reloj</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <h3 class="form-label" style="margin-bottom: 12px; font-size: 0.85rem; color: var(--text-main);">2. Relojes en este Paquete</h3>
+            
+            <div id="contenedor-items"></div>
+
+            <button type="button" onclick="agregarFilaReloj()" class="btn-add-item">
+              ➕ Agregar Otro Modelo de Reloj
+            </button>
+
+            <div class="package-summary-box">
+              <h3 class="form-label" style="margin-bottom: 16px; color: var(--text-main); font-size: 0.85rem;">📊 Resumen Global de Costos y Envíos</h3>
+              <div class="form-grid cols-4" id="resumen-global-paquete"></div>
+            </div>
+
+            <button type="submit" id="btn-guardar" class="btn-submit">
+              💾 Guardar Paquete Completo en Inventario
+            </button>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
